@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
 
-use crate::edges;
+use crate::{contrast, edges};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -17,6 +17,8 @@ pub struct Settings {
     pub height: u32,
     pub step: u32,
     pub threshold: u8,
+    pub balance: u8,
+    pub detail: u8,
     pub smoothing: u8,
     pub fill_enclosed: bool,
     pub fill_spacing: u32,
@@ -254,6 +256,7 @@ pub fn plan(image: &DynamicImage, settings: Settings) -> Plan {
             gray[i] = (luminance * pixel[3] as i32 + 255 * (255 - pixel[3] as i32)) / 255;
         }
     }
+    let gray = contrast::balance(&gray, &visible, grid_w, grid_h, settings.balance);
     let map_point = |x: u32, y: u32| {
         (
             (x * analysis_step).min(image_width - 1) as i32,
@@ -276,10 +279,16 @@ pub fn plan(image: &DynamicImage, settings: Settings) -> Plan {
                 );
                 (regions.paths, Some(regions.interior))
             } else {
-                (
-                    edges::ink_contours(&gray, &visible, grid_w, grid_h, settings.threshold),
-                    None,
-                )
+                let selected = edges::ink_mask(
+                    &gray,
+                    &visible,
+                    grid_w,
+                    grid_h,
+                    settings.threshold,
+                    settings.detail,
+                    false,
+                );
+                (edges::ink_contours(&selected, grid_w, grid_h), None)
             };
             if settings.fill_enclosed
                 && let Some(interior) = interior
@@ -323,20 +332,28 @@ pub fn plan(image: &DynamicImage, settings: Settings) -> Plan {
             strokes.extend(merged);
         }
         Mode::Dark => {
+            let selected = edges::ink_mask(
+                &gray,
+                &visible,
+                grid_w,
+                grid_h,
+                settings.threshold,
+                settings.detail,
+                settings.invert,
+            );
             let stride = settings.step.div_ceil(analysis_step).max(1) as usize;
             for y in (0..grid_h).step_by(stride) {
                 let mut x = 0;
                 while x < grid_w {
                     let i = (y * grid_w + x) as usize;
-                    if !visible[i] || !((gray[i] < settings.threshold as i32) ^ settings.invert) {
+                    if !selected[i] {
                         x += 1;
                         continue;
                     }
                     let start = x;
                     while x < grid_w {
                         let i = (y * grid_w + x) as usize;
-                        if !visible[i] || !((gray[i] < settings.threshold as i32) ^ settings.invert)
-                        {
+                        if !selected[i] {
                             break;
                         }
                         x += 1;

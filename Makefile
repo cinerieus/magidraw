@@ -1,5 +1,7 @@
 # MagiDraw Windows build. Run `make windows` on Linux with the Rust Windows GNU
-# target and MinGW installed. Versioned executables and checksums go in dist/.
+# target and MinGW installed. Local balance, adaptive detail, and line-art tracing
+# are built in.
+# Versioned executables and checksums go in dist/.
 
 NAME           := magidraw
 VERSION        := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
