@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod contrast;
 mod drawing;
 mod edges;
 mod platform;
@@ -29,6 +30,8 @@ struct App {
     bottom: i32,
     step: u32,
     threshold: u8,
+    balance: u8,
+    detail: u8,
     smoothing: u8,
     fill_enclosed: bool,
     fill_spacing: u32,
@@ -62,6 +65,8 @@ impl Default for App {
             bottom: 800,
             step: 3,
             threshold: 90,
+            balance: 35,
+            detail: 15,
             smoothing: 1,
             fill_enclosed: false,
             fill_spacing: 2,
@@ -125,6 +130,8 @@ impl App {
             height: height as u32,
             step: self.step,
             threshold: self.threshold,
+            balance: self.balance,
+            detail: self.detail,
             smoothing: self.smoothing,
             fill_enclosed: self.fill_enclosed,
             fill_spacing: self.fill_spacing,
@@ -305,6 +312,22 @@ impl eframe::App for App {
                         .changed();
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label("Local balance");
+                changed |= ui
+                    .add(egui::Slider::new(&mut self.balance, 0..=100).suffix("%"))
+                    .changed();
+                ui.label("0% keeps original tones; higher values reveal local detail");
+            });
+            if self.mode != Mode::Edges {
+                ui.horizontal(|ui| {
+                    ui.label("Local detail difference");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.detail, 0..=50))
+                        .changed();
+                    ui.label("0 turns off; lower values find fainter marks");
+                });
+            }
             if self.mode == Mode::Edges {
                 ui.horizontal(|ui| {
                     changed |= ui

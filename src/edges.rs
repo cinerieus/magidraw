@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use image::{GrayImage, Luma};
 use imageproc::{
+    contrast::adaptive_threshold,
     edges::canny,
     filter::bilateral::{GaussianEuclideanColorDistance, bilateral_filter},
 };
@@ -100,7 +101,7 @@ fn connected(
     Some(next)
 }
 
-fn trace(mask: &[bool], width: usize, height: usize) -> Vec<Vec<(u32, u32)>> {
+fn trace(mask: &[bool], width: usize, height: usize, min_points: usize) -> Vec<Vec<(u32, u32)>> {
     let mut degree = vec![0u8; mask.len()];
     for (i, &on) in mask.iter().enumerate() {
         if on {
@@ -141,13 +142,23 @@ fn trace(mask: &[bool], width: usize, height: usize) -> Vec<Vec<(u32, u32)>> {
                     };
                     direction = next_direction;
                 }
-                if path.len() >= 4 {
+                if path.len() >= min_points {
                     paths.push(
                         path.into_iter()
                             .map(|(x, y)| (x as u32, y as u32))
                             .collect(),
                     );
                 }
+            }
+        }
+    }
+    if min_points == 1 {
+        for (index, &on) in mask.iter().enumerate() {
+            if on && degree[index] == 0 {
+                paths.push(vec![(
+                    index as u32 % width as u32,
+                    index as u32 / width as u32,
+                )]);
             }
         }
     }
@@ -189,73 +200,172 @@ pub fn edge_regions(
         .map(|(i, pixel)| visible[i] && pixel[0] != 0)
         .collect();
     let interior = enclosed_pixels(&mask, visible, width as usize, height as usize);
-    let paths = trace(&mask, width as usize, height as usize);
+    let paths = trace(&mask, width as usize, height as usize, 4);
     EdgeRegions { paths, interior }
 }
 
-pub fn ink_contours(
+pub fn ink_mask(
     gray: &[i32],
     visible: &[bool],
     width: u32,
     height: u32,
     threshold: u8,
-) -> Vec<Vec<(u32, u32)>> {
+    detail: u8,
+    invert: bool,
+) -> Vec<bool> {
+    let adaptive = if detail == 0 {
+        None
+    } else {
+        let source = GrayImage::from_fn(width, height, |x, y| {
+            let value = gray[(y * width + x) as usize].clamp(0, 255) as u8;
+            Luma([if invert { 255 - value } else { value }])
+        });
+        let radius = (width.min(height) / 64).clamp(4, 32);
+        Some(adaptive_threshold(&source, radius, detail as i32))
+    };
+    gray.iter()
+        .zip(visible)
+        .enumerate()
+        .map(|(index, (&value, &shown))| {
+            shown
+                && ((value < threshold as i32) != invert
+                    || adaptive
+                        .as_ref()
+                        .is_some_and(|image| image.as_raw()[index] == 0))
+        })
+        .collect()
+}
+
+pub fn ink_contours(selected: &[bool], width: u32, height: u32) -> Vec<Vec<(u32, u32)>> {
     let width = width as usize;
     let height = height as usize;
-    let mut mask: Vec<bool> = gray
-        .iter()
-        .zip(visible)
-        .map(|(&value, &shown)| shown && value < threshold as i32)
-        .collect();
+    let mut mask = selected.to_vec();
     if width < 3 || height < 3 {
-        return trace(&mask, width, height);
+        return trace(&mask, width, height, 1);
     }
-    for _ in 0..32 {
+    let mut active = Vec::new();
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let i = y * width + x;
+            if mask[i]
+                && [i - width, i + width, i - 1, i + 1]
+                    .iter()
+                    .any(|&neighbor| !mask[neighbor])
+            {
+                active.push(i);
+            }
+        }
+    }
+    let mut queued = vec![false; mask.len()];
+    loop {
         let mut changed = false;
         for pass in 0..2 {
             let mut remove = Vec::new();
-            for y in 1..height - 1 {
-                for x in 1..width - 1 {
-                    let i = y * width + x;
-                    if !mask[i] {
-                        continue;
-                    }
-                    let ring = [
-                        mask[i - width],
-                        mask[i - width + 1],
-                        mask[i + 1],
-                        mask[i + width + 1],
-                        mask[i + width],
-                        mask[i + width - 1],
-                        mask[i - 1],
-                        mask[i - width - 1],
-                    ];
-                    let count = ring.iter().filter(|&&on| on).count();
-                    let transitions = (0..8).filter(|&k| !ring[k] && ring[(k + 1) % 8]).count();
-                    if !(2..=6).contains(&count) || transitions != 1 {
-                        continue;
-                    }
-                    let erase_connection = if pass == 0 {
-                        (ring[0] && ring[2] && ring[4]) || (ring[2] && ring[4] && ring[6])
-                    } else {
-                        (ring[0] && ring[2] && ring[6]) || (ring[0] && ring[4] && ring[6])
-                    };
-                    if erase_connection {
-                        continue;
-                    }
+            for &i in &active {
+                if !mask[i] {
+                    continue;
+                }
+                let ring = [
+                    mask[i - width],
+                    mask[i - width + 1],
+                    mask[i + 1],
+                    mask[i + width + 1],
+                    mask[i + width],
+                    mask[i + width - 1],
+                    mask[i - 1],
+                    mask[i - width - 1],
+                ];
+                let count = ring.iter().filter(|&&on| on).count();
+                let transitions = (0..8).filter(|&k| !ring[k] && ring[(k + 1) % 8]).count();
+                if !(2..=6).contains(&count) || transitions != 1 {
+                    continue;
+                }
+                let erase_connection = if pass == 0 {
+                    (ring[0] && ring[2] && ring[4]) || (ring[2] && ring[4] && ring[6])
+                } else {
+                    (ring[0] && ring[2] && ring[6]) || (ring[0] && ring[4] && ring[6])
+                };
+                if !erase_connection {
                     remove.push(i);
                 }
             }
-            if !remove.is_empty() {
-                changed = true;
-            }
-            for i in remove {
+            changed |= !remove.is_empty();
+            for &i in &remove {
                 mask[i] = false;
             }
+            let mut next = Vec::with_capacity(active.len());
+            for &i in &active {
+                if mask[i] {
+                    queued[i] = true;
+                    next.push(i);
+                }
+            }
+            for i in remove {
+                let x = i % width;
+                let y = i / width;
+                for ny in y.saturating_sub(1)..=(y + 1).min(height - 2) {
+                    for nx in x.saturating_sub(1)..=(x + 1).min(width - 2) {
+                        let neighbor = ny * width + nx;
+                        if nx > 0 && ny > 0 && mask[neighbor] && !queued[neighbor] {
+                            queued[neighbor] = true;
+                            next.push(neighbor);
+                        }
+                    }
+                }
+            }
+            for &i in &next {
+                queued[i] = false;
+            }
+            active = next;
         }
         if !changed {
             break;
         }
     }
-    trace(&mask, width, height)
+    trace(&mask, width, height, 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ink_contours, ink_mask, trace};
+
+    #[test]
+    fn short_lines_and_single_pixels_are_kept() {
+        let mut mask = vec![false; 25];
+        mask[11] = true;
+        mask[12] = true;
+        mask[24] = true;
+        let paths = trace(&mask, 5, 5, 1);
+        assert!(paths.iter().any(|path| path.len() == 2));
+        assert!(paths.iter().any(|path| path == &[(4, 4)]));
+    }
+
+    #[test]
+    fn thick_ink_thins_past_old_iteration_limit() {
+        let mut mask = vec![false; 100 * 100];
+        for y in 10..90 {
+            for x in 10..90 {
+                mask[y * 100 + x] = true;
+            }
+        }
+        let paths = ink_contours(&mask, 100, 100);
+        assert!(!paths.is_empty());
+        assert!(
+            paths
+                .iter()
+                .flatten()
+                .all(|&(x, y)| (30..=70).contains(&x) && (30..=70).contains(&y))
+        );
+    }
+
+    #[test]
+    fn adaptive_detail_finds_light_ink_without_filling_background() {
+        let mut gray = vec![220; 32 * 32];
+        for y in 4..28 {
+            gray[y * 32 + 16] = 190;
+        }
+        let mask = ink_mask(&gray, &vec![true; gray.len()], 32, 32, 90, 15, false);
+        assert!(mask[16 * 32 + 16]);
+        assert!(!mask[16 * 32 + 20]);
+    }
 }
